@@ -1,0 +1,11 @@
+{
+  "name": "async-queue",
+  "version": "0.1.0",
+  "description": "Simple AsyncQueue implementation, based on <http://2ality.com/2016/10/asynchronous-iteration.html>",
+  "main": "async-queue.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "zer0 <zer0.kaos@gmail.com>",
+  "license": "MIT"
+}
