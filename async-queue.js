@@ -1,14 +1,12 @@
 const enqueue = (array, value) => array.push(value);
 const dequeue = array => array.shift();
 
-const _values = Symbol("AsyncQueue/values");
-const _settlers = Symbol("AsyncQueue/settlers");
-const _closed = Symbol("AsyncQueue/closed");
-const _subscribers = Symbol("AsyncQueue/subscribers");
+const _values = Symbol("AsyncQueue:values");
+const _settlers = Symbol("AsyncQueue:settlers");
+const _closed = Symbol("AsyncQueue:closed");
+const _subscribers = Symbol("AsyncQueue:subscribers");
 
-const unset = Symbol("unset");
-
-export class AsyncQueue {
+export default class AsyncQueue {
   constructor() {
     // enqueues > dequeues
     this[_values] = [];
@@ -113,12 +111,20 @@ export function map(q, transform) {
 
   q[_values].forEach(value => enqueue(nq[_values], transform(value)));
 
-  q.subscribe({
+  const subscriber = {
     onNext(value) {
       nq.enqueue(transform(value));
     },
     onClose() {
       nq.close();
+    }
+  };
+
+  q.subscribe(subscriber);
+
+  nq.subscribe({
+    onClose() {
+      q.unsubscribe(subscriber);
     }
   });
 
