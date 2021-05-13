@@ -4,16 +4,62 @@ const dequeue = array => array.shift();
 const _values = Symbol("AsyncQueue:values");
 const _settlers = Symbol("AsyncQueue:settlers");
 const _closed = Symbol("AsyncQueue:closed");
-const _subscribers = Symbol("AsyncQueue:subscribers");
 
-export default class AsyncQueue {
+class QueueValueEvent extends CustomEvent {
+  constructor(value) {
+    super("value", { detail: value });
+  }
+}
+
+class QueueChainableAction {
   constructor() {
+
+  }
+}
+
+class FilterAction extends QueueChainableAction {
+  constructor(q, nq, predicate) {
+    super();
+    this.q = q;
+    this.nq = nq;
+    this.predicate = predicate;
+  }
+
+  onInit() {
+    const { predicate, q, nq } = this;
+
+    q[_values].forEach(value => {
+      if (predicate(value)) {
+        enqueue(nq[_values], value);
+      }
+    });
+
+    q.addEventListener("value", () => this.onValue());
+    q.addEventListener("close", () => this.onClose());
+  }
+
+  onValue(value) {
+    const { predicate, nq } = this;
+
+    if (predicate(value)) {
+      nq.enqueue(value.detail);
+    }
+  }
+
+  onClose() {
+    this.nq.close();
+  }
+}
+
+export default class AsyncQueue extends EventTarget {
+  constructor() {
+    super();
+
     // enqueues > dequeues
     this[_values] = [];
     // dequeues > enqueues
     this[_settlers] = [];
-    // subscribers
-    this[_subscribers] = new Set();
+
     this[_closed] = false;
   }
 
@@ -41,17 +87,22 @@ export default class AsyncQueue {
       if (value instanceof Error) {
         settler.reject(value);
       } else {
-        this[_subscribers].forEach(
-          subscriber =>
-            subscriber.onNext && subscriber.onNext(value, Date.now())
-        );
+        let valueEvent = new QueueValueEvent(value);
+        this.dispatchEvent(valueEvent);
+
         settler.resolve({ value });
       }
+
     } else {
-      this[_subscribers].forEach(
-        subscriber => subscriber.onNext && subscriber.onNext(value, Date.now())
-      );
-      enqueue(this[_values], value);
+      let valueEvent = new QueueValueEvent(value);
+
+      this.dispatchEvent(valueEvent);
+
+      if (value instanceof Event) {
+        enqueue(this[_values], value);
+      } else {
+        enqueue(this[_values], valueEvent);
+      }
     }
   }
 
@@ -86,23 +137,14 @@ export default class AsyncQueue {
     while (this[_settlers].length > 0) {
       dequeue(this[_settlers]).resolve({ done: true });
     }
-    this[_subscribers].forEach(
-      subscriber => subscriber.onClose && subscriber.onClose()
-    );
-    this[_subscribers].clear();
+
     this[_closed] = true;
+
+    this.dispatchEvent(new CustomEvent("close"));
   }
 
   get closed() {
     return this[_closed];
-  }
-
-  subscribe(subscriber) {
-    this[_subscribers].add(subscriber);
-  }
-
-  unsubscribe(subscriber) {
-    this[_subscribers].delete(subscriber);
   }
 }
 
@@ -111,22 +153,17 @@ export function map(q, transform) {
 
   q[_values].forEach(value => enqueue(nq[_values], transform(value)));
 
-  const subscriber = {
-    onNext(value) {
-      nq.enqueue(transform(value));
-    },
-    onClose() {
-      nq.close();
-    }
-  };
+  const onValue = value => nq.enqueue(transform(value.detail));
+  const onClose = () => nq.close();
 
-  q.subscribe(subscriber);
+  q.addEventListener("value", onValue);
+  q.addEventListener("close", onClose);
 
-  nq.subscribe({
-    onClose() {
-      q.unsubscribe(subscriber);
-    }
-  });
+
+  nq.addEventListener("close", () => {
+    q.removeEventListener("value", onValue);
+    q.removeEventListener("close", onClose);
+  })
 
   return nq;
 }
@@ -140,16 +177,16 @@ export function filter(q, predicate) {
     }
   });
 
-  q.subscribe({
-    onNext(value) {
-      if (predicate(value)) {
-        nq.enqueue(value);
-      }
-    },
-    onClose() {
-      nq.close();
+  const onValue = (value) => {
+    if (predicate(value)) {
+      nq.enqueue(value.detail);
     }
-  });
+  }
+
+  const onClose = () => nq.close();
+
+  q.addEventListener("value", onValue);
+  q.addEventListener("close", onClose);
 
   return nq;
 }
@@ -157,49 +194,68 @@ export function filter(q, predicate) {
 export function merge(q1, q2) {
   const nq = new AsyncQueue();
 
-  q1[_values].forEach(value => enqueue(nq[_values], value));
-  q2[_values].forEach(value => enqueue(nq[_values], value));
+  [...q1[_values], ...q2[_values]]
+    .sort((a, b) => a.timeStamp - b.timeStamp)
+    .forEach(value => enqueue(nq[_values], value));
 
-  const subscriber = {
-    onNext(value) {
-      nq.enqueue(value);
-    }
-  };
+  let onValue = value => nq.enqueue(value.detail);
+  q1.addEventListener("value", onValue);
+  q2.addEventListener("value", onValue);
 
-  q1.subscribe(subscriber);
-  q2.subscribe(subscriber);
-
-  nq.subscribe({
-    onClose() {
-      q1.unsubscribe(subscriber);
-      q2.unsubscribe(subscriber);
-    }
+  nq.addEventListener("close", () => {
+    q1.removeEventListener("value", onValue);
+    q2.removeEventListener("value", onValue);
   });
+
   return nq;
 }
 
-export function debounce(q, ms) {
+export function take(q, n) {
   const nq = new AsyncQueue();
-  const { length } = q[_values];
 
-  let idt = null;
+  q[_values].slice(0, n).forEach(value => enqueue(nq[_values], value));
 
-  if (length) {
-    enqueue(nq[_values], q[_values][length - 1]);
+  if (nq[_values].length < n) {
+    let i = 0;
+    let onValue = value => {
+      i++;
+      if (i > n) {
+        nq.close();
+      } else {
+        nq.enqueue(value.detail);
+      }
+    };
+    q.addEventListener("value", onValue);
+    q.addEventListener("close", () => {
+      nq.close()
+    })
   }
 
-  q.subscribe({
-    onNext(value, timestamp) {
-      idt && clearTimeout(idt);
-      idt = setTimeout(() => {
-        nq.enqueue(value);
-        idt = null;
-      }, ms);
-    },
-    onClose() {
-      nq.close();
-    }
-  });
-
   return nq;
 }
+
+// export function debounce(q, ms) {
+//   const nq = new AsyncQueue();
+//   const { length } = q[_values];
+
+//   let idt = null;
+
+//   if (length) {
+//     enqueue(nq[_values], q[_values][length - 1]);
+//   }
+
+//   q.subscribe({
+//     onNext(value, timestamp) {
+//       idt && clearTimeout(idt);
+//       idt = setTimeout(() => {
+//         nq.enqueue(value);
+//         idt = null;
+//       }, ms);
+//     },
+//     onClose() {
+//       nq.close();
+//     }
+//   });
+
+//   return nq;
+// }
